@@ -10,8 +10,11 @@
 import type { RoomId } from "../core/Room.js";
 import type { PeerMetadata } from "../core/Peer.js";
 import type { ConnectionState } from "../transport/Transport.js";
+import type { TimerProvider, WebSocketFactory } from "../transport/Adapter.js";
+import type { ResourceLimits } from "../security/Limits.js";
 import type {
   DiscoveryProvider,
+  DiscoveryEvent,
   DiscoveredPeer,
 } from "../discovery/DiscoveryProvider.js";
 import type { SignalingProvider } from "../signaling/SignalingProvider.js";
@@ -27,6 +30,55 @@ export interface DiscoveryManagerApi {
   stop(): Promise<void>;
   /** Latest snapshot of peers found across all providers. */
   getDiscovered(): readonly DiscoveredPeer[];
+}
+
+/** Events emitted by `DiscoveryManager` on its own typed emitter. */
+export interface DiscoveryManagerEvents extends Record<string, unknown> {
+  /** A validated, deduplicated peer was seen for the first time (or after
+   *  expiry) — mapped to the public `peer:discovered` event. */
+  discovered: DiscoveredPeerInfoPayload;
+  /** A previously-discovered entry expired (TTL) or was explicitly gone. */
+  expired: DiscoveredPeerInfoPayload;
+  /** Normalized provider stream (state changes, warnings, raw errors). */
+  "provider-event": DiscoveryEvent & { providerId: string };
+  /** Tracker-level connection state — mapped to public `tracker:*` events. */
+  "tracker-status": {
+    providerId: string;
+    url: string;
+    connected: boolean;
+    error?: Error;
+  };
+}
+
+/** Public payload shape for discovery hits (spec §34 `peer:discovered`). */
+export interface DiscoveredPeerInfoPayload {
+  peerId: string;
+  appId: string;
+  roomId?: RoomId;
+  metadata?: PeerMetadata;
+  /** Which providers currently hold this logical peer (source metadata). */
+  sources: readonly string[];
+}
+
+/** Options accepted by the concrete `DiscoveryManager`. */
+export interface DiscoveryManagerOptions {
+  appId: string;
+  self: { peerId: string; metadata?: PeerMetadata };
+  limits: ResourceLimits;
+  discovery: {
+    minAnnounceIntervalSec: number;
+    maxAnnounceIntervalSec: number;
+    numwant: number;
+    recentlyGoneCapacity: number;
+  };
+  reconnectBaseDelayMs?: number;
+  reconnectMaxDelayMs?: number;
+  reconnectAttempts?: number;
+  timers?: TimerProvider;
+  /** Injected WebSocket factory used when auto-creating tracker providers. */
+  webSocketFactory?: WebSocketFactory;
+  /** Deterministic jitter source (tests inject a constant). */
+  random?: () => number;
 }
 
 /* ----------------------------- Signaling ----------------------------- */

@@ -1,5 +1,8 @@
-node_modules/
+# Build artifacts
 dist/
-coverage/
-*.log
-.DS_Store
+
+# Dependencies
+node_modules/
+
+# Temp files
+*.tmp

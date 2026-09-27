@@ -30,11 +30,9 @@ describe("public API surface", () => {
 
   it("unimplemented facades throw NotImplementedError with phase hints", async () => {
     const client = new api.P2PClient({ appId: "demo" });
-    expect(() => client.joinRoom("room-1")).toThrow(NotImplementedError);
+    // Phase 2: joinRoom() is real now (discovery scope) — other planes are not.
     expect(() => client.connectTo("peer-x")).toThrow(/Phase 4/);
-    expect(() => client.control.discovery.addProvider({} as never)).toThrow(
-      /control.*Phase 2/,
-    );
+    expect(() => client.control.signaling.negotiate("p")).toThrow(/Phase 3/);
     expect(() => client.data.rpc.request("sum")).toThrow(/data.*Phase 5/);
     expect(() => client.media.audio.start()).toThrow(/media.*Phase 9/);
     await expect(client.stats.getPeerStats("p")).rejects.toThrow(NotImplementedError);
@@ -49,7 +47,7 @@ describe("public API surface", () => {
           ping: (...a: unknown[]) => void;
         }
       ).ping(),
-    ).toThrow(/client\.control\.ping\(\).*Phase 2/);
+    ).toThrow(/client\.control\.ping\(\).*Phase 3/);
     // Depth-3 leaf (facade.sub.method())
     expect(() =>
       (
@@ -58,14 +56,16 @@ describe("public API surface", () => {
         }
       ).start(),
     ).toThrow(/client\.media\.video\.start\(\).*Phase 9/);
-    // Depth-4+ arbitrary nesting (facade.a.b.method())
+    // Depth-4+ arbitrary nesting under a REAL Phase-2 manager still yields
+    // TypeError (unknown member of a live object, not a proxy stub), while
+    // depth-4 under a not-ready facade throws NotImplementedError.
     expect(() =>
       (
-        client.control.discovery as unknown as {
+        client.control.signaling as unknown as {
           providers: { tracker: { start: () => void } };
         }
       ).providers.tracker.start(),
-    ).toThrow(/client\.control\.discovery\.providers\.tracker\.start\(\).*Phase 2/);
+    ).toThrow(/client\.control\.signaling\.providers\.tracker\.start\(\).*Phase 3/);
     // Async members reject (usable inside await) at any depth
     return expect(
       (

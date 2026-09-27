@@ -175,6 +175,8 @@ export interface DiscoveredPeerInfo {
   roomId?: RoomId;
   appId: string;
   metadata?: PeerMetadata;
+  /** Phase 2 (additive): providers that currently hold this logical peer. */
+  sources?: readonly string[];
 }
 
 export type EventName = keyof P2PEvents;

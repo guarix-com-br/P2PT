@@ -9,11 +9,17 @@
 
 import { NotImplementedError } from "./errors.js";
 import { generateId } from "./ids.js";
-import { TypedEventEmitter, type P2PEvents } from "./events.js";
-// Peer/Room are only used as types here; instances are created by the
-// ConnectionManager (Phase 4) and joinRoom() (Phase 13).
+import {
+  TypedEventEmitter,
+  type P2PEvents,
+  type DiscoveredPeerInfo,
+} from "./events.js";
+// Peer is only used as a type here; instances are created by the
+// ConnectionManager (Phase 4). Room handles are real in Phase 2: joining a
+// room today means joining its *discovery scope* (no connections yet —
+// full room semantics arrive with Phases 4/13).
 import type { Peer, PeerMetadata } from "./Peer.js";
-import type { Room, RoomId, RoomMetadata } from "./Room.js";
+import { Room, type RoomId, type RoomMetadata } from "./Room.js";
 import {
   resolveConfig,
   type P2PConfigInput,
@@ -22,11 +28,22 @@ import {
 import type { DataPlaneApi } from "../data/DataPlane.js";
 import type { MediaPlaneApi } from "../media/MediaPlane.js";
 import type { ControlPlaneApi } from "../control/ControlPlane.js";
+import { DiscoveryManager } from "../discovery/DiscoveryManager.js";
 import type { StatsManagerApi } from "../stats/StatsManager.js";
 import type { PresenceStatus } from "../presence/types.js";
 
 export interface ConnectOptions {
   roomId?: RoomId;
+}
+
+/** Extra construction seams for testing (injected timers/WebSocket). */
+export interface P2PClientOptions extends P2PConfigInput {
+  /** @internal inject a WebSocket factory (Node < 22 / tests). */
+  webSocketFactory?: import("../transport/Adapter.js").WebSocketFactory;
+  /** @internal inject timer provider (fake timers in tests). */
+  timers?: import("../transport/Adapter.js").TimerProvider;
+  /** @internal deterministic jitter source. */
+  random?: () => number;
 }
 
 /**
@@ -85,7 +102,10 @@ export class P2PClient extends TypedEventEmitter<P2PEvents> {
 
   #closed = false;
 
-  /** Control-plane facades (implemented Phases 2–4, 13). */
+  /** Phase 2: real discovery manager (control plane, discovery only). */
+  readonly #discovery: DiscoveryManager;
+
+  /** Control-plane facades (signaling/connections implemented Phases 3–4). */
   readonly control: ControlPlaneApi;
   /** Data-plane facade (implemented Phases 5–8). */
   readonly data: DataPlaneApi;
@@ -97,13 +117,73 @@ export class P2PClient extends TypedEventEmitter<P2PEvents> {
   #rooms = new Map<RoomId, Room>();
   #peers = new Map<string, Peer>();
 
-  constructor(input: P2PConfigInput) {
+  constructor(input: P2PClientOptions) {
     super();
-    this.config = resolveConfig(input);
+    const { webSocketFactory, timers, random, ...configInput } = input;
+    void configInput; // consumed via resolveConfig below
+    this.config = resolveConfig(configInput);
     this.id = this.config.peerId ?? generateId("peer");
     this.metadata = { name: this.config.peerName, ...this.config.metadata };
 
-    this.control = notReady("client.control", 2) as unknown as ControlPlaneApi;
+    /* --------------------- Phase 2: discovery wiring -------------------- */
+    this.#discovery = new DiscoveryManager({
+      appId: this.config.appId,
+      self: { peerId: this.id, metadata: this.metadata },
+      limits: this.config.limits,
+      discovery: this.config.discovery,
+      reconnectBaseDelayMs: this.config.reconnectBaseDelayMs,
+      reconnectMaxDelayMs: this.config.reconnectMaxDelayMs,
+      reconnectAttempts: this.config.reconnectAttempts,
+      ...(timers !== undefined ? { timers } : {}),
+      ...(webSocketFactory !== undefined ? { webSocketFactory } : {}),
+      ...(random !== undefined ? { random } : {}),
+    });
+
+    if (this.config.autoDiscover) {
+      for (const url of this.config.trackers) {
+        this.#discovery.addTrackerProvider(url);
+      }
+    }
+
+    // Manager → public event bus mapping (spec §34 names, unchanged).
+    this.#discovery.on("discovered", (info) => {
+      const payload: DiscoveredPeerInfo = {
+        peerId: info.peerId,
+        appId: info.appId,
+        sources: info.sources,
+      };
+      if (info.roomId !== undefined) payload.roomId = info.roomId;
+      if (info.metadata !== undefined) payload.metadata = info.metadata;
+      this.emit("peer:discovered", payload);
+    });
+    this.#discovery.on("provider-event", (ev) => {
+      this.emit("discovery:event", ev);
+    });
+    this.#discovery.on("tracker-status", (status) => {
+      const url = status.url;
+      const providerId = status.providerId;
+      if (status.error) {
+        this.emit("tracker:error", { providerId, url, error: status.error });
+        return;
+      }
+      if (status.connected) {
+        this.emit("tracker:connected", { providerId, url });
+      } else {
+        this.emit("tracker:disconnected", { providerId, url });
+      }
+    });
+
+    // Real discovery facade; the rest of the control plane stays a proxy
+    // until Phases 3/4 replace it piecewise.
+    const notReadyControl = notReady("client.control", 3) as Record<string, unknown>;
+    const discoveryFacade = this.#discovery as unknown as ControlPlaneApi["discovery"];
+    this.control = new Proxy(notReadyControl, {
+      get(target, prop) {
+        if (prop === "discovery") return discoveryFacade;
+        return Reflect.get(target, prop);
+      },
+    }) as unknown as ControlPlaneApi;
+
     this.data = notReady("client.data", 5) as unknown as DataPlaneApi;
     this.media = notReady("client.media", 9) as unknown as MediaPlaneApi;
     this.stats = notReady("client.stats", 15) as unknown as StatsManagerApi;
@@ -114,15 +194,30 @@ export class P2PClient extends TypedEventEmitter<P2PEvents> {
   }
 
   /**
-   * Join a room: announces membership through discovery and connects to
-   * existing members. Implemented in Phase 13 on top of Phases 2–4.
+   * Join a room's DISCOVERY scope (Phase 2 semantics): derive the
+   * deterministic namespace, announce through registered providers and
+   * collect peers. Creates NO connections, NO WebRTC objects, NO media —
+   * connecting to discovered peers arrives with Phase 4 (`connectTo`) and
+   * full room fan-out with Phase 13.
    */
-  joinRoom(_roomId: RoomId, _metadata?: RoomMetadata): Promise<Room> {
-    throw new NotImplementedError("P2PClient.joinRoom()", 13);
+  async joinRoom(roomId: RoomId, metadata?: RoomMetadata): Promise<Room> {
+    if (this.#closed) throw new Error("client is closed");
+    let room = this.#rooms.get(roomId);
+    if (!room) {
+      room = new Room({ id: roomId, ...(metadata ? { metadata } : {}) });
+      this.#rooms.set(roomId, room);
+    }
+    await this.#discovery.joinRoom(roomId);
+    this.emit("room:joined", { roomId, peers: [] });
+    return room;
   }
 
-  leaveRoom(_roomId: RoomId): Promise<void> {
-    throw new NotImplementedError("P2PClient.leaveRoom()", 13);
+  /** Leave a room's discovery scope and release tracker references. */
+  async leaveRoom(roomId: RoomId): Promise<void> {
+    if (!this.#rooms.has(roomId)) return;
+    await this.#discovery.leaveRoom(roomId);
+    this.#rooms.delete(roomId);
+    this.emit("room:left", { roomId });
   }
 
   getRoom(roomId: RoomId): Room | undefined {
@@ -157,6 +252,9 @@ export class P2PClient extends TypedEventEmitter<P2PEvents> {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
+    // Phase 2: full discovery teardown (providers stopped/destroyed,
+    // pooled tracker sockets released). Transports arrive in Phase 4.
+    await this.#discovery.destroy();
     // Real teardown cascades once planes exist; today: drop peers/rooms and
     // every listener so no callback survives a closed client.
     this.#peers.clear();

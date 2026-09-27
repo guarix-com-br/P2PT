@@ -34,6 +34,27 @@ export interface P2PConfigInput {
   /* Discovery / signaling (Phase 2/3 consume these). */
   trackers?: string[];
   signalingUrls?: string[];
+  /**
+   * When true (default), every `trackers` entry spawns a WebTorrent-
+   * compatible discovery provider at client construction. Set false to
+   * register providers manually via `client.control.discovery.addProvider`.
+   */
+  autoDiscover?: boolean;
+
+  /**
+   * Phase 2 discovery tuning (all optional; sensible validated defaults).
+   * `peerTtlMs` lives in `limits`, so TTL policy is configured there.
+   */
+  discovery?: {
+    /** Floor for announce refresh even if a tracker reports less (sec). */
+    minAnnounceIntervalSec?: number;
+    /** Safety cap on our own periodic re-announce period (sec). */
+    maxAnnounceIntervalSec?: number;
+    /** Peers requested per tracker announce. */
+    numwant?: number;
+    /** How many stale entries to remember for silent-drop suppression. */
+    recentlyGoneCapacity?: number;
+  };
 
   /* NAT traversal (spec §30). */
   iceServers?: IceServerConfig[];
@@ -59,6 +80,13 @@ export interface ResolvedP2PConfig {
   metadata: Record<string, string | number | boolean>;
   trackers: string[];
   signalingUrls: string[];
+  autoDiscover: boolean;
+  discovery: {
+    minAnnounceIntervalSec: number;
+    maxAnnounceIntervalSec: number;
+    numwant: number;
+    recentlyGoneCapacity: number;
+  };
   iceServers: IceServerConfig[];
   requestTimeoutMs: number;
   transferTimeoutMs: number;
@@ -79,12 +107,20 @@ const DEFAULTS = {
   metadata: {},
   trackers: [],
   signalingUrls: [],
+  autoDiscover: true,
   requestTimeoutMs: 10_000,
   transferTimeoutMs: 120_000,
   connectTimeoutMs: 30_000,
   reconnectAttempts: 5,
   reconnectBaseDelayMs: 500,
   reconnectMaxDelayMs: 30_000,
+} as const;
+
+const DEFAULT_DISCOVERY = {
+  minAnnounceIntervalSec: 30,
+  maxAnnounceIntervalSec: 1800,
+  numwant: 50,
+  recentlyGoneCapacity: 256,
 } as const;
 
 function isPositiveInt(v: unknown): v is number {
@@ -127,6 +163,9 @@ export function resolveConfig(input: P2PConfigInput): ResolvedP2PConfig {
   if (input.peerName !== undefined && typeof input.peerName !== "string") {
     issues.push({ path: "peerName", message: "must be a string" });
   }
+  if (input.autoDiscover !== undefined && typeof input.autoDiscover !== "boolean") {
+    issues.push({ path: "autoDiscover", message: "must be a boolean" });
+  }
 
   const numericFields = [
     "requestTimeoutMs",
@@ -143,6 +182,35 @@ export function resolveConfig(input: P2PConfigInput): ResolvedP2PConfig {
   }
   if (input.reconnectAttempts !== undefined && !isPositiveInt(input.reconnectAttempts)) {
     issues.push({ path: "reconnectAttempts", message: "must be a positive integer" });
+  }
+
+  const discovery = {
+    minAnnounceIntervalSec:
+      input.discovery?.minAnnounceIntervalSec ?? DEFAULT_DISCOVERY.minAnnounceIntervalSec,
+    maxAnnounceIntervalSec:
+      input.discovery?.maxAnnounceIntervalSec ?? DEFAULT_DISCOVERY.maxAnnounceIntervalSec,
+    numwant: input.discovery?.numwant ?? DEFAULT_DISCOVERY.numwant,
+    recentlyGoneCapacity:
+      input.discovery?.recentlyGoneCapacity ?? DEFAULT_DISCOVERY.recentlyGoneCapacity,
+  };
+  for (const field of [
+    "minAnnounceIntervalSec",
+    "maxAnnounceIntervalSec",
+    "numwant",
+    "recentlyGoneCapacity",
+  ] as const) {
+    if (!isPositiveInt(discovery[field])) {
+      issues.push({ path: `discovery.${field}`, message: "must be a positive integer" });
+    }
+  }
+  if (
+    issues.length === 0 &&
+    discovery.minAnnounceIntervalSec > discovery.maxAnnounceIntervalSec
+  ) {
+    issues.push({
+      path: "discovery.minAnnounceIntervalSec",
+      message: "must not exceed discovery.maxAnnounceIntervalSec",
+    });
   }
 
   const trackers = input.trackers ?? DEFAULTS.trackers;
@@ -179,6 +247,8 @@ export function resolveConfig(input: P2PConfigInput): ResolvedP2PConfig {
     metadata: { ...DEFAULTS.metadata, ...input.metadata },
     trackers: [...trackers],
     signalingUrls: [...signalingUrls],
+    autoDiscover: input.autoDiscover ?? DEFAULTS.autoDiscover,
+    discovery,
     iceServers: iceServers.map((s) => ({ ...s })),
     requestTimeoutMs: input.requestTimeoutMs ?? DEFAULTS.requestTimeoutMs,
     transferTimeoutMs: input.transferTimeoutMs ?? DEFAULTS.transferTimeoutMs,

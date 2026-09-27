@@ -25,6 +25,15 @@ export interface ResourceLimits {
   maxPeers: number;
   /** Per-peer inbound messages per second before throttling. */
   maxMessagesPerSecond: number;
+
+  /* ---- Phase 2: discovery-scoped limits (additive) ---- */
+
+  /** Hard ceiling on simultaneously discovered peers (all rooms). */
+  maxDiscoveredPeers: number;
+  /** Accepted provider hits per second before drops start. */
+  discoveryRatePerSecond: number;
+  /** A peer hit unseen for this long expires from the registry (ms). */
+  peerTtlMs: number;
 }
 
 export const DEFAULT_LIMITS: ResourceLimits = {
@@ -35,6 +44,9 @@ export const DEFAULT_LIMITS: ResourceLimits = {
   maxPendingRequests: 64,
   maxPeers: 20, // honest mesh ceiling; see ARCHITECTURE.md scalability note
   maxMessagesPerSecond: 200,
+  maxDiscoveredPeers: 500,
+  discoveryRatePerSecond: 50,
+  peerTtlMs: 180_000,
 };
 
 const POSITIVE_INT_FIELDS: ReadonlyArray<keyof ResourceLimits> = [
@@ -45,6 +57,9 @@ const POSITIVE_INT_FIELDS: ReadonlyArray<keyof ResourceLimits> = [
   "maxPendingRequests",
   "maxPeers",
   "maxMessagesPerSecond",
+  "maxDiscoveredPeers",
+  "discoveryRatePerSecond",
+  "peerTtlMs",
 ];
 
 /** Validate a limits object; returns field-level issues (empty = valid). */

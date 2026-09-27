@@ -23,11 +23,18 @@ export interface DiscoveredPeer {
   hints?: Record<string, unknown>;
 }
 
+/**
+ * Provider → manager event stream. Phase 2 extended this union
+ * additively (`warning`, `retrying`) — every Phase-1 variant keeps its
+ * exact shape, so Phase-1 providers remain source-compatible.
+ */
 export type DiscoveryEvent =
   | { type: "peer"; peer: DiscoveredPeer }
   | { type: "peer-gone"; peerId: string; roomId?: RoomId }
   | { type: "state"; state: DiscoveryProviderState; previous: DiscoveryProviderState }
-  | { type: "error"; error: Error };
+  | { type: "error"; error: Error; retryable?: boolean }
+  | { type: "warning"; message: string }
+  | { type: "retrying"; attempt: number; delayMs: number };
 
 export interface DiscoveryStartOptions {
   /** Application namespace — peers only discover peers in the same app. */
@@ -38,11 +45,22 @@ export interface DiscoveryStartOptions {
   self: { peerId: string; metadata?: PeerMetadata };
 }
 
+/**
+ * Optional scope commands a provider MAY implement to support
+ * incremental room joins/leaves without a full restart. The manager
+ * feature-detects these methods; providers without them are restarted
+ * with the new room set instead (fully backward compatible).
+ */
+export interface DiscoveryScopeCommands {
+  joinRoom?(roomId?: RoomId): Promise<void> | void;
+  leaveRoom?(roomId?: RoomId): Promise<void> | void;
+}
+
 export interface DiscoveryProviderEvents {
   event: DiscoveryEvent;
 }
 
-export interface DiscoveryProvider {
+export interface DiscoveryProvider extends Partial<DiscoveryScopeCommands> {
   /** Stable identifier for logs/events (`tracker:<url>`, `ws:<url>`, …). */
   readonly id: string;
   readonly state: DiscoveryProviderState;
@@ -51,6 +69,8 @@ export interface DiscoveryProvider {
   stop(): Promise<void>;
   /** Periodic re-announce where the source requires it (trackers do). */
   announce?(): Promise<void>;
+  /** Optional hard teardown after `stop()` (release pooled resources). */
+  destroy?(): Promise<void>;
   on<E extends keyof DiscoveryProviderEvents>(
     event: E,
     handler: (payload: DiscoveryProviderEvents[E]) => void,
