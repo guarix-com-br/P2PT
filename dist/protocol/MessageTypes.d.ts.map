@@ -1,0 +1,1 @@
+{"version":3,"file":"MessageTypes.d.ts","sourceRoot":"","sources":["../../src/protocol/MessageTypes.ts"],"names":[],"mappings":"AAAA;;;;;;;;;;;;GAYG;AAEH,eAAO,MAAM,WAAW;;;;;;;;;;;;;;;;;;;;;;;;;CAkCd,CAAC;AAEX,MAAM,MAAM,gBAAgB,GAAG,CAAC,OAAO,WAAW,CAAC,CAAC,MAAM,OAAO,WAAW,CAAC,CAAC;AAE9E,mEAAmE;AACnE,eAAO,MAAM,UAAU;IACrB,4DAA4D;;IAE5D,kEAAkE;;IAElE,mDAAmD;;CAE3C,CAAC"}
